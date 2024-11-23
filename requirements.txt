@@ -4,3 +4,4 @@ flask-sqlalchemy
 openai
 requests
 pymysql
+boto3

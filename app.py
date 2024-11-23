@@ -8,7 +8,7 @@ from enum import Enum
 from sqlalchemy.sql.expression import func
 from openai import OpenAI
 import json
-
+from secrets_manager import get_service_secrets
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, 
@@ -19,16 +19,26 @@ logging.basicConfig(
 app = Flask(__name__)
 CORS(app)
 
-C_PORT = 5012  # Port for gnosis-influencer
+secrets = get_service_secrets('gnosis-influencer')
 
-# Database configuration (same as gnosis-convos)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://admin:lGrBWwcZJS10NwFBByTK@convos-db.c1ytbjumgtbu.us-east-1.rds.amazonaws.com:3306/conversation_db'
+C_PORT = int(secrets.get('PORT', 5000))
+SQLALCHEMY_DATABASE_URI = (
+    f"mysql+pymysql://{secrets['MYSQL_USER']}:{secrets['MYSQL_PASSWORD_CONVOS']}"
+    f"@{secrets['MYSQL_HOST']}:{secrets['MYSQL_PORT']}/{secrets['MYSQL_DATABASE']}"
+)
+app.config['SQLALCHEMY_DATABASE_URI'] = SQLALCHEMY_DATABASE_URI
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
+OPENAI_API_KEY = secrets.get('OPENAI_API_KEY')
+
+# Service URLs
+PROFILES_API_URL = secrets.get('PROFILES_API_URL')
+QUERIES_API_URL = secrets.get('QUERY_API_URL')
+
 # Initialize OpenAI client
-client = OpenAI()
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Models (Copied from gnosis-convos)
 class SenderType(Enum):
@@ -52,10 +62,6 @@ class Message(db.Model):
     content_chunk_id = db.Column(db.Integer, nullable=True)
     message_text = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime(timezone=True), default=func.now(), nullable=False)
-
-# Service URLs
-PROFILES_API_URL = 'http://localhost:5011'
-QUERIES_API_URL = 'http://localhost:5009'
 
 @app.route('/api/message/ai', methods=['POST'])
 def post_message_ai():
