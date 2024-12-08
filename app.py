@@ -9,6 +9,7 @@ from sqlalchemy.sql.expression import func
 from openai import OpenAI
 import json
 from secrets_manager import get_service_secrets
+import sys
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, 
@@ -21,7 +22,7 @@ CORS(app)
 
 secrets = get_service_secrets('gnosis-influencer')
 
-C_PORT = int(secrets.get('PORT', 5000))
+C_PORT = int(secrets.get('PORT', 5005))
 SQLALCHEMY_DATABASE_URI = (
     f"mysql+pymysql://{secrets['MYSQL_USER']}:{secrets['MYSQL_PASSWORD_CONVOS']}"
     f"@{secrets['MYSQL_HOST']}:{secrets['MYSQL_PORT']}/{secrets['MYSQL_DATABASE']}"
@@ -116,25 +117,50 @@ def post_message_ai():
                 return jsonify({'error': 'No user message found to base AI response on'}), 400
 
             # Search for similar chunks
-            search_resp = requests.get(
-                f"{QUERIES_API_URL}/api/search",
-                params={
-                    'user_id': conversation.user_id,
-                    'content_id': conversation.content_id,
-                    'query': ' '.join([msg.message_text for msg in last_messages]),
-                    'limit': 1
-                }
+            
+            search_resp = requests.post(  #post method 
+                "https://h45zy6hwq5esxit6dct5khu34a.appsync-api.us-east-1.amazonaws.com/graphql", # change url
+                headers={
+                "Content-Type": "application/json",
+                "x-api-key": "da2-d544fmiglbeczcvqci7vjzhfpm"  #  api key
+                },json={
+            #query below is graphql for searching data
+        "query": """ 
+            query searcher($userId: String!, $query: String!, $limit: Int!) {
+            searchSimilarChunks(userId: $userId, query: $query, limit: $limit) {
+              chunkId
+              contentId
+              fileName
+              text
+              similarityScore
+            }
+          }
+            """,
+            "variables": {
+            "userId": conversation.user_id,
+            "query": ' '.join([msg.message_text for msg in last_messages]),
+            "limit": 1 
+        }
+    }
             )
             if search_resp.status_code != 200:
                 logging.error("Failed to perform search")
                 return jsonify({'error': 'Failed to perform search'}), 500
+            
+            
 
             search_result = search_resp.json()
-            if not search_result['results']:
+            chunks = search_result.get('data', {}).get('searchSimilarChunks', [])
+            if not chunks:
                 return jsonify({'error': 'No similar content found for AI to respond with'}), 400
 
-            top_result = search_result['results'][0]
-            content_chunk_id = top_result['chunk_id']
+            logging.info(f"Chunks {chunks}")
+
+            # if not search_result['results']:
+            #     return jsonify({'error': 'No similar content found for AI to respond with'}), 400
+
+            top_result = chunks[0]
+            content_chunk_id = top_result['chunkId']
             chunk_text = top_result['text']
 
         # Step 4: Prepare conversation context
