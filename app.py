@@ -21,6 +21,8 @@ CORS(app)
 
 secrets = get_service_secrets('gnosis-influencer')
 
+API_KEY = secrets.get('API_KEY')
+
 C_PORT = int(secrets.get('PORT', 5000))
 SQLALCHEMY_DATABASE_URI = (
     f"mysql+pymysql://{secrets['MYSQL_USER']}:{secrets['MYSQL_PASSWORD_CONVOS']}"
@@ -91,7 +93,8 @@ def post_message_ai():
         messages = Message.query.filter_by(conversation_id=conversation_id).order_by(Message.timestamp).all()
 
         # Step 2: Get AI persona via profiles API
-        ai_profile_resp = requests.get(f"{PROFILES_API_URL}/api/ais/content/{conversation.content_id}")
+        headers = {'X-API-KEY': API_KEY}
+        ai_profile_resp = requests.get(f"{PROFILES_API_URL}/api/ais/content/{conversation.content_id}", headers=headers)
         if ai_profile_resp.status_code != 200:
             logging.error("Failed to retrieve AI profile")
             return jsonify({'error': 'Failed to retrieve AI profile'}), 500
@@ -102,7 +105,7 @@ def post_message_ai():
         # Step 3: Get the chunk text
         if content_chunk_id:
             # Get chunk text via gnosis-query
-            chunk_resp = requests.get(f"{QUERIES_API_URL}/api/chunk/{content_chunk_id}")
+            chunk_resp = requests.get(f"{QUERIES_API_URL}/api/chunk/{content_chunk_id}", headers=headers)
             if chunk_resp.status_code != 200:
                 logging.error("Failed to retrieve chunk text")
                 return jsonify({'error': 'Failed to retrieve chunk text'}), 500
@@ -123,7 +126,8 @@ def post_message_ai():
                     'content_id': conversation.content_id,
                     'query': ' '.join([msg.message_text for msg in last_messages]),
                     'limit': 1
-                }
+                },
+                headers=headers
             )
             if search_resp.status_code != 200:
                 logging.error("Failed to perform search")
@@ -194,6 +198,24 @@ def post_message_ai():
     except Exception as e:
         logging.error(f"Error in post_message_ai: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
+    
+# add middleware
+@app.before_request
+def log_request_info():
+    logging.info(f"Headers: {request.headers}")
+    logging.info(f"Body: {request.get_data()}")
+
+    # for now just check that it has a Authorization header
+    if 'X-API-KEY' not in request.headers:
+        logging.warning("No X-API-KEY header")
+        return jsonify({'error': 'No X-API-KEY'}), 401
+    
+    x_api_key = request.headers.get('X-API-KEY')
+    if x_api_key != API_KEY:
+        logging.warning("Invalid X-API-KEY")
+        return jsonify({'error': 'Invalid X-API-KEY'}), 401
+    else:
+        return
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=C_PORT)
