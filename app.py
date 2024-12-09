@@ -38,6 +38,7 @@ OPENAI_API_KEY = secrets.get('OPENAI_API_KEY')
 # Service URLs
 PROFILES_API_URL = secrets.get('PROFILES_API_URL')
 QUERIES_API_URL = secrets.get('QUERY_API_URL')
+GRAPHQL_API_URL = secrets.get('GRAPHQL_API_URL') # http://54.159.168.135:5000/graphql 
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -77,20 +78,26 @@ def post_message_ai():
     }
     """
     data = request.get_json()
+    logging.info(f"Received request data: {data}")
+    
     if not data or 'conversation_id' not in data:
+        logging.warning("Missing conversation_id in request data.")
         return jsonify({'error': 'conversation_id is required'}), 400
 
     conversation_id = data['conversation_id']
     content_chunk_id = data.get('content_chunk_id')
+    logging.info(f"Processing conversation_id: {conversation_id}, content_chunk_id: {content_chunk_id}")
 
     try:
         # Step 1: Fetch the conversation and messages
         conversation = Conversation.query.get(conversation_id)
         if not conversation:
+            logging.warning(f"Conversation not found for id: {conversation_id}")
             return jsonify({'error': 'Conversation not found'}), 404
 
         # Get all messages in the conversation
         messages = Message.query.filter_by(conversation_id=conversation_id).order_by(Message.timestamp).all()
+        logging.info(f"Retrieved {len(messages)} messages for conversation_id: {conversation_id}")
 
         # Step 2: Get AI persona via profiles API
         headers = {'X-API-KEY': API_KEY}
@@ -101,6 +108,7 @@ def post_message_ai():
 
         ai_profile = ai_profile_resp.json()
         systems_instructions = ai_profile.get('systems_instructions', '')
+        logging.info("Successfully retrieved AI profile and systems instructions.")
 
         # Step 3: Get the chunk text
         if content_chunk_id:
@@ -111,35 +119,59 @@ def post_message_ai():
                 return jsonify({'error': 'Failed to retrieve chunk text'}), 500
             chunk_data = chunk_resp.json()
             chunk_text = chunk_data['text']
+            logging.info(f"Retrieved chunk text for content_chunk_id: {content_chunk_id}")
         else:
             # Use most recent two messages to find similar chunk (concatenate them)
             last_messages = [msg for msg in reversed(messages)][:2]
             if len(last_messages) == 0:
-                # No user messages yet; cannot proceed                
+                logging.warning("No user messages found to base AI response on.")
                 return jsonify({'error': 'No user message found to base AI response on'}), 400
 
-            # Search for similar chunks
-            search_resp = requests.get(
-                f"{QUERIES_API_URL}/api/search",
-                params={
-                    'user_id': conversation.user_id,
-                    'content_id': conversation.content_id,
-                    'query': ' '.join([msg.message_text for msg in last_messages]),
-                    'limit': 1
-                },
-                headers=headers
+            # Search for similar chunks using GraphQL
+            query = """
+            query search($userId: String!, $queryText: String!, $limit: Int!) {
+                searchSimilarChunks(userId: $userId, query: $queryText, limit: $limit) {
+                    chunkId
+                    contentId
+                    fileName
+                    text
+                    similarityScore
+                }
+            }
+            """
+            
+            variables = {
+                "userId": str(conversation.user_id),  # GraphQL expects string
+                "queryText": ' '.join([msg.message_text for msg in last_messages]),
+                "limit": 1
+            }
+            
+            search_resp = requests.post(
+                GRAPHQL_API_URL,
+                headers=headers,
+                json={
+                    "query": query,
+                    "variables": variables
+                }
             )
+            # logging.info(f"GraphQL search response: {search_resp.json()}")
             if search_resp.status_code != 200:
-                logging.error("Failed to perform search")
+                logging.error("Failed to perform GraphQL search")
                 return jsonify({'error': 'Failed to perform search'}), 500
 
             search_result = search_resp.json()
-            if not search_result['results']:
+            if 'errors' in search_result:
+                logging.error(f"GraphQL errors: {search_result['errors']}")
+                return jsonify({'error': 'Failed to perform search'}), 500
+
+            if not search_result.get('data', {}).get('searchSimilarChunks'):
+                logging.warning("No similar content found for AI to respond with.")
                 return jsonify({'error': 'No similar content found for AI to respond with'}), 400
 
-            top_result = search_result['results'][0]
-            content_chunk_id = top_result['chunk_id']
+            top_result = search_result['data']['searchSimilarChunks'][0]
+            content_chunk_id = top_result['chunkId']
             chunk_text = top_result['text']
+            logging.info(f"Found similar chunk with id: {content_chunk_id}")
 
         # Step 4: Prepare conversation context
         conversation_context = []
@@ -149,7 +181,7 @@ def post_message_ai():
             conversation_context.append({'role': role, 'content': msg.message_text})
             if msg.sender == SenderType.user:
                 user_query = msg.message_text
-                # Effectively gets the last user message
+                logging.info(f"Last user message: {user_query}")
 
         # Step 5: Generate AI response
         prompt_messages = [
@@ -170,12 +202,15 @@ def post_message_ai():
         prompt_messages.append({'role': 'user', 'content': prompt})
 
         # Make API call to GPT-4o
+        logging.info("Making API call to GPT-4o for response generation.")
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=prompt_messages
         )
 
         response_json = json.loads(response.choices[0].message.content.strip().replace("```json", "").replace("```", ""))
+        logging.info("Received response from GPT-4o.")
+
         try:
             for tweet in response_json:                
                 # Step 6: Add AI message to the conversation
@@ -187,12 +222,12 @@ def post_message_ai():
                 )
                 db.session.add(ai_message)
             db.session.commit()
-        except:
-            logging.error("Invalid JSON response from GPT-4o")
+            logging.info(f"AI messages appended to conversation {conversation_id}.")
+        except Exception as e:
+            logging.error(f"Error while adding AI messages to the database: {str(e)}")
             return jsonify({'error': 'Invalid JSON response from GPT-4o'}), 500                
 
         # Acknowledgment
-        logging.info(f"AI messages appended to conversation {conversation_id}")
         return jsonify({'message': 'AI messages appended to conversation'}), 200
 
     except Exception as e:
