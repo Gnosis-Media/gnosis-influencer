@@ -86,6 +86,7 @@ def post_message_ai():
 
     conversation_id = data['conversation_id']
     content_chunk_id = data.get('content_chunk_id')
+    correlation_id = request.headers.get('X-Correlation-ID')  # Get correlation ID from headers
     logging.info(f"Processing conversation_id: {conversation_id}, content_chunk_id: {content_chunk_id}")
 
     try:
@@ -101,9 +102,12 @@ def post_message_ai():
 
         # Step 2: Get AI persona via profiles API
         headers = {'X-API-KEY': API_KEY}
+        if correlation_id:
+            headers['X-Correlation-ID'] = correlation_id
         ai_profile_resp = requests.get(f"{PROFILES_API_URL}/api/ais/content/{conversation.content_id}", headers=headers)
         if ai_profile_resp.status_code != 200:
             logging.error("Failed to retrieve AI profile")
+            logging.error(f"Response: {ai_profile_resp.text}")
             return jsonify({'error': 'Failed to retrieve AI profile'}), 500
 
         ai_profile = ai_profile_resp.json()
